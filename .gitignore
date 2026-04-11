@@ -1,0 +1,12 @@
+Binaries/
+Intermediate/
+Content/
+Source/TemporalRewindPro/
+Saved/
+DerivedDataCache/
+*.sln
+*.suo
+.vs/
+.idea/
+*.xcworkspace
+*.xcodeproj
