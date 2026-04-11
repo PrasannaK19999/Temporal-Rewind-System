@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "TemporalEnums.generated.h"
 
-
 /** State machine for UTemporalRewindSubsystem. */
 UENUM(BlueprintType)
 enum class ETemporalSystemState : uint8

@@ -3,13 +3,13 @@
 #include "Session/RewindSessionContext.h"
 #include "TemporalRewindModule.h"
 
-void URewindSessionContext::Initialize(float PresentTimestamp, float MaxScrubRange, float Speed)
+void URewindSessionContext::Initialize(float PresentTimestamp, float InMaxScrubRange, float InSpeed)
 {
 	RewindStartTimestamp = PresentTimestamp;
 	OriginalPresentTimestamp = PresentTimestamp;
 	CurrentScrubTimestamp = PresentTimestamp;
-	OldestAllowedTimestamp = PresentTimestamp - FMath::Max(MaxScrubRange, 0.0f);
-	RewindSpeed = FMath::Max(Speed, 0.0f);
+	OldestAllowedTimestamp = PresentTimestamp - FMath::Max(InMaxScrubRange, 0.0f);
+	RewindSpeed = FMath::Max(InSpeed, 0.0f);
 	Direction = ERewindDirection::Backward;
 
 	UE_LOG(LogTemporalRewind, Verbose,
@@ -19,8 +19,6 @@ void URewindSessionContext::Initialize(float PresentTimestamp, float MaxScrubRan
 
 void URewindSessionContext::AdvanceScrub(float DeltaTime)
 {
-	// Backward moves scrub timestamp toward the past (subtract).
-	// Forward moves it toward the present (add).
 	const float Sign = (Direction == ERewindDirection::Backward) ? -1.0f : 1.0f;
 	CurrentScrubTimestamp += Sign * RewindSpeed * DeltaTime;
 	ClampScrubTimestamp();

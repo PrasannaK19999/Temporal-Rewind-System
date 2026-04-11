@@ -1,15 +1,18 @@
 // Copyright (c) Temporal Rewind System. All rights reserved.
 
 #include "Subsystem/TemporalRewindSubsystem.h"
-#include "TemporalRewindModule.h"
-#include "Timeline/ActorSnapshotTimeline.h"
+
+#include "Engine/World.h"
+#include "Interfaces/Rewindable.h"
 #include "Recording/RecordingStrategy.h"
 #include "Session/RewindSessionContext.h"
-#include "Interfaces/Rewindable.h"
 #include "Settings/TemporalRewindSettings.h"
-#include "Engine/World.h"
+#include "TemporalRewindModule.h"
+#include "Timeline/ActorSnapshotTimeline.h"
 
-// --- State machine transition table ----------------------------------------
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
 
 namespace TemporalRewind::StateMachine
 {
@@ -24,15 +27,15 @@ namespace TemporalRewind::StateMachine
 		{ ETemporalSystemState::Idle,       ETemporalSystemState::Recording },
 		{ ETemporalSystemState::Recording,  ETemporalSystemState::Idle      },
 		{ ETemporalSystemState::Recording,  ETemporalSystemState::Rewinding },
+		{ ETemporalSystemState::Rewinding,  ETemporalSystemState::Cooldown  },
 		{ ETemporalSystemState::Rewinding,  ETemporalSystemState::Paused    },
 		{ ETemporalSystemState::Rewinding,  ETemporalSystemState::Scrubbing },
-		{ ETemporalSystemState::Rewinding,  ETemporalSystemState::Cooldown  },
+		{ ETemporalSystemState::Paused,     ETemporalSystemState::Cooldown  },
 		{ ETemporalSystemState::Paused,     ETemporalSystemState::Rewinding },
 		{ ETemporalSystemState::Paused,     ETemporalSystemState::Scrubbing },
-		{ ETemporalSystemState::Paused,     ETemporalSystemState::Cooldown  },
+		{ ETemporalSystemState::Scrubbing,  ETemporalSystemState::Cooldown  },
 		{ ETemporalSystemState::Scrubbing,  ETemporalSystemState::Paused    },
 		{ ETemporalSystemState::Scrubbing,  ETemporalSystemState::Rewinding },
-		{ ETemporalSystemState::Scrubbing,  ETemporalSystemState::Cooldown  },
 		{ ETemporalSystemState::Cooldown,   ETemporalSystemState::Recording },
 	};
 
@@ -63,7 +66,9 @@ namespace TemporalRewind::StateMachine
 	}
 }
 
-// --- Lifecycle --------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
 void UTemporalRewindSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -71,15 +76,12 @@ void UTemporalRewindSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 	ActiveRecordingStrategy = NewObject<URecordingStrategy>(this);
 
-	// Apply project-wide defaults from Edit → Project Settings → Plugins → Temporal Rewind.
-	// These are the starting values; runtime calls (SetMaxScrubRange, SetRecordingStrategy, etc.)
-	// override them independently after startup.
 	if (const UTemporalRewindSettings* Settings = GetDefault<UTemporalRewindSettings>())
 	{
-		BufferDuration      = Settings->BufferDuration;
-		MaxScrubRange       = FMath::Min(Settings->MaxScrubRange, Settings->BufferDuration);
-		CooldownDuration    = Settings->CooldownDuration;
-		RewindSpeed         = Settings->RewindSpeed;
+		BufferDuration = Settings->BufferDuration;
+		MaxScrubRange = FMath::Min(Settings->MaxScrubRange, Settings->BufferDuration);
+		CooldownDuration = Settings->CooldownDuration;
+		RewindSpeed = Settings->RewindSpeed;
 		DefaultOrphanPolicy = Settings->DefaultOrphanPolicy;
 		ActiveRecordingStrategy->SetRecordingInterval(Settings->GetEffectiveRecordingInterval());
 	}
@@ -89,21 +91,19 @@ void UTemporalRewindSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 	UE_LOG(LogTemporalRewind, Display,
 		TEXT("[TemporalRewindSubsystem] Initialized. BufferDuration=%.2fs MaxScrubRange=%.2fs RecordingInterval=%.4fs"),
-		BufferDuration, MaxScrubRange,
-		ActiveRecordingStrategy->GetRecordingInterval());
+		BufferDuration, MaxScrubRange, ActiveRecordingStrategy->GetRecordingInterval());
 }
 
 void UTemporalRewindSubsystem::Deinitialize()
 {
-	RegisteredActors.Empty();
+	ActiveRecordingStrategy = nullptr;
+	ActiveSessionContext = nullptr;
 	ActorTimelines.Empty();
 	OrphanedTimelines.Empty();
-	ActiveSessionContext = nullptr;
-	ActiveRecordingStrategy = nullptr;
+	RegisteredActors.Empty();
 	bTickEnabled = false;
 
-	UE_LOG(LogTemporalRewind, Display,
-		TEXT("[TemporalRewindSubsystem] Deinitialized."));
+	UE_LOG(LogTemporalRewind, Display, TEXT("[TemporalRewindSubsystem] Deinitialized."));
 
 	Super::Deinitialize();
 }
@@ -113,24 +113,25 @@ TStatId UTemporalRewindSubsystem::GetStatId() const
 	RETURN_QUICK_DECLARE_CYCLE_STAT(UTemporalRewindSubsystem, STATGROUP_Tickables);
 }
 
-// --- Tick dispatch ----------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Tick
+// ---------------------------------------------------------------------------
 
 void UTemporalRewindSubsystem::Tick(float DeltaTime)
 {
 	switch (CurrentState)
 	{
-	case ETemporalSystemState::Idle:                                break;
+	case ETemporalSystemState::Idle:                                 break;
 	case ETemporalSystemState::Recording:  TickRecording(DeltaTime); break;
 	case ETemporalSystemState::Rewinding:  TickRewinding(DeltaTime); break;
-	case ETemporalSystemState::Scrubbing:  TickScrubbing(DeltaTime); break;
 	case ETemporalSystemState::Paused:     TickPaused(DeltaTime);    break;
+	case ETemporalSystemState::Scrubbing:  TickScrubbing(DeltaTime); break;
 	case ETemporalSystemState::Cooldown:   TickCooldown(DeltaTime);  break;
 	}
 }
 
 void UTemporalRewindSubsystem::TickRecording(float DeltaTime)
 {
-	// Sweep dead actors first so we don't try to poll a stale ref this frame.
 	CleanupStaleActors();
 
 	if (!ActiveRecordingStrategy || !ActiveRecordingStrategy->ShouldRecordThisTick(DeltaTime))
@@ -143,14 +144,12 @@ void UTemporalRewindSubsystem::TickRecording(float DeltaTime)
 	{
 		return;
 	}
+
 	const float NowTimestamp = World->GetTimeSeconds();
 
-	// Iterate the registry. Per-actor hot path: dirty check is O(1),
-	// conditional capture is O(blob-size), push is O(1).
 	for (TPair<FGuid, FRewindableActorEntry>& Pair : RegisteredActors)
 	{
 		FRewindableActorEntry& Entry = Pair.Value;
-
 		UObject* Obj = Entry.WeakRef.Get();
 		if (!Obj)
 		{
@@ -182,20 +181,15 @@ void UTemporalRewindSubsystem::TickRewinding(float DeltaTime)
 
 	ActiveSessionContext->AdvanceScrub(DeltaTime);
 	ApplyStateAtScrubTimestamp();
-
 	OnScrubUpdated.Broadcast(ActiveSessionContext->GetCurrentScrubTimestamp());
 }
 
-void UTemporalRewindSubsystem::TickScrubbing(float DeltaTime)
+void UTemporalRewindSubsystem::TickPaused(float /*DeltaTime*/)
 {
-	// Doc line 458: Scrubbing does NOT advance the scrub timestamp per tick.
-	// Scrub position changes only when ScrubTo() is called externally. Tick
-	// is intentionally a no-op to keep the state reactive to transitions.
 }
 
-void UTemporalRewindSubsystem::TickPaused(float DeltaTime)
+void UTemporalRewindSubsystem::TickScrubbing(float /*DeltaTime*/)
 {
-	// Doc line 459: Paused performs no actor iteration and no apply.
 }
 
 void UTemporalRewindSubsystem::TickCooldown(float DeltaTime)
@@ -214,15 +208,15 @@ void UTemporalRewindSubsystem::TickCooldown(float DeltaTime)
 		}
 	}
 }
-// --- State machine ----------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
 
 bool UTemporalRewindSubsystem::TryTransitionTo(ETemporalSystemState NewState)
 {
 	if (NewState == CurrentState)
 	{
-		UE_LOG(LogTemporalRewind, Verbose,
-			TEXT("[TemporalRewindSubsystem] TryTransitionTo(%s): already in this state."),
-			TemporalRewind::StateMachine::StateToString(NewState));
 		return false;
 	}
 
@@ -235,18 +229,18 @@ bool UTemporalRewindSubsystem::TryTransitionTo(ETemporalSystemState NewState)
 		return false;
 	}
 
-	const ETemporalSystemState OldState = CurrentState;
-	CurrentState = NewState;
-
 	UE_LOG(LogTemporalRewind, Display,
 		TEXT("[TemporalRewindSubsystem] State: %s -> %s"),
-		TemporalRewind::StateMachine::StateToString(OldState),
+		TemporalRewind::StateMachine::StateToString(CurrentState),
 		TemporalRewind::StateMachine::StateToString(NewState));
 
+	CurrentState = NewState;
 	return true;
 }
 
-// --- State queries ----------------------------------------------------------
+// ---------------------------------------------------------------------------
+// State queries
+// ---------------------------------------------------------------------------
 
 bool UTemporalRewindSubsystem::IsRewindActive() const
 {
@@ -255,26 +249,26 @@ bool UTemporalRewindSubsystem::IsRewindActive() const
 		|| CurrentState == ETemporalSystemState::Scrubbing;
 }
 
-// --- Recording control ------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Recording
+// ---------------------------------------------------------------------------
 
 void UTemporalRewindSubsystem::StartRecording()
 {
-	if (TryTransitionTo(ETemporalSystemState::Recording))
+	if (TryTransitionTo(ETemporalSystemState::Recording) && ActiveRecordingStrategy)
 	{
-		if (ActiveRecordingStrategy)
-		{
-			ActiveRecordingStrategy->Reset();
-		}
+		ActiveRecordingStrategy->Reset();
 	}
 }
 
 void UTemporalRewindSubsystem::StopRecording()
 {
-	// Doc line 393: buffer data retained on stop.
 	TryTransitionTo(ETemporalSystemState::Idle);
 }
 
-// --- Registration -----------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
 
 void UTemporalRewindSubsystem::RegisterRewindable(TScriptInterface<IRewindable> Rewindable)
 {
@@ -282,25 +276,21 @@ void UTemporalRewindSubsystem::RegisterRewindable(TScriptInterface<IRewindable> 
 	if (!Obj)
 	{
 		UE_LOG(LogTemporalRewind, Warning,
-			TEXT("[TemporalRewindSubsystem] RegisterRewindable called with null object. Ignored."));
+			TEXT("[TemporalRewindSubsystem] RegisterRewindable called with null object."));
 		return;
 	}
 
-	// Read the actor's identity and policy once, cache forever (doc line 498).
 	const FGuid ActorGuid = IRewindable::Execute_GetRewindableId(Obj);
 	if (!ActorGuid.IsValid())
 	{
 		UE_LOG(LogTemporalRewind, Warning,
-			TEXT("[TemporalRewindSubsystem] RegisterRewindable: actor %s returned an invalid GUID. Ignored."),
+			TEXT("[TemporalRewindSubsystem] RegisterRewindable: %s returned invalid GUID."),
 			*Obj->GetName());
 		return;
 	}
 
 	if (RegisteredActors.Contains(ActorGuid))
 	{
-		UE_LOG(LogTemporalRewind, Verbose,
-			TEXT("[TemporalRewindSubsystem] RegisterRewindable: actor %s already registered. No-op."),
-			*ActorGuid.ToString());
 		return;
 	}
 
@@ -310,7 +300,6 @@ void UTemporalRewindSubsystem::RegisterRewindable(TScriptInterface<IRewindable> 
 	Entry.WeakRef = TWeakObjectPtr<UObject>(Obj);
 	RegisteredActors.Add(ActorGuid, Entry);
 
-	// One timeline per actor, pre-sized from current buffer/interval.
 	UActorSnapshotTimeline* Timeline = NewObject<UActorSnapshotTimeline>(this);
 	Timeline->Initialize(ActorGuid, ComputeTimelineCapacity());
 	ActorTimelines.Add(ActorGuid, Timeline);
@@ -326,8 +315,6 @@ void UTemporalRewindSubsystem::UnregisterRewindable(TScriptInterface<IRewindable
 	UObject* Obj = Rewindable.GetObject();
 	if (!Obj)
 	{
-		UE_LOG(LogTemporalRewind, Warning,
-			TEXT("[TemporalRewindSubsystem] UnregisterRewindable called with null object. Ignored."));
 		return;
 	}
 
@@ -335,15 +322,9 @@ void UTemporalRewindSubsystem::UnregisterRewindable(TScriptInterface<IRewindable
 	const FRewindableActorEntry* Entry = RegisteredActors.Find(ActorGuid);
 	if (!Entry)
 	{
-		UE_LOG(LogTemporalRewind, Verbose,
-			TEXT("[TemporalRewindSubsystem] UnregisterRewindable: %s not found. No-op."),
-			*ActorGuid.ToString());
 		return;
 	}
 
-	// Explicit unregister is a clean exit � apply the same orphan policy as
-	// the stale-ref cleanup path, for consistency with actors that die without
-	// calling unregister.
 	const EOrphanedTimelinePolicy Policy = Entry->OrphanPolicy;
 	RegisteredActors.Remove(ActorGuid);
 
@@ -352,16 +333,9 @@ void UTemporalRewindSubsystem::UnregisterRewindable(TScriptInterface<IRewindable
 		UActorSnapshotTimeline* Timeline = *TimelinePtr;
 		ActorTimelines.Remove(ActorGuid);
 
-		switch (Policy)
+		if (Policy != EOrphanedTimelinePolicy::PurgeImmediately)
 		{
-		case EOrphanedTimelinePolicy::PurgeImmediately:
-			// Drop the reference; GC will collect.
-			break;
-
-		case EOrphanedTimelinePolicy::KeepUntilOverwritten:
-		case EOrphanedTimelinePolicy::KeepIndefinitely:
 			OrphanedTimelines.Add(ActorGuid, Timeline);
-			break;
 		}
 	}
 
@@ -371,11 +345,12 @@ void UTemporalRewindSubsystem::UnregisterRewindable(TScriptInterface<IRewindable
 	OnActorUnregistered.Broadcast(ActorGuid);
 }
 
-// --- Stale-ref sweep --------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Stale-ref sweep
+// ---------------------------------------------------------------------------
 
 void UTemporalRewindSubsystem::CleanupStaleActors()
 {
-	// Collect first, mutate after. Cannot remove from a TMap mid-iteration.
 	TArray<FGuid, TInlineAllocator<8>> StaleGuids;
 
 	for (const TPair<FGuid, FRewindableActorEntry>& Pair : RegisteredActors)
@@ -397,7 +372,7 @@ void UTemporalRewindSubsystem::CleanupStaleActors()
 		const EOrphanedTimelinePolicy Policy = Entry->OrphanPolicy;
 
 		UE_LOG(LogTemporalRewind, Warning,
-			TEXT("[TemporalRewindSubsystem] Stale weak ref detected for actor %s during recording tick. Applying orphan policy."),
+			TEXT("[TemporalRewindSubsystem] Stale ref detected for %s. Applying orphan policy."),
 			*StaleGuid.ToString());
 
 		RegisteredActors.Remove(StaleGuid);
@@ -407,15 +382,9 @@ void UTemporalRewindSubsystem::CleanupStaleActors()
 			UActorSnapshotTimeline* Timeline = *TimelinePtr;
 			ActorTimelines.Remove(StaleGuid);
 
-			switch (Policy)
+			if (Policy != EOrphanedTimelinePolicy::PurgeImmediately)
 			{
-			case EOrphanedTimelinePolicy::PurgeImmediately:
-				break;
-
-			case EOrphanedTimelinePolicy::KeepUntilOverwritten:
-			case EOrphanedTimelinePolicy::KeepIndefinitely:
 				OrphanedTimelines.Add(StaleGuid, Timeline);
-				break;
 			}
 		}
 
@@ -423,7 +392,28 @@ void UTemporalRewindSubsystem::CleanupStaleActors()
 	}
 }
 
-// --- Orphan management ------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Orphan management
+// ---------------------------------------------------------------------------
+
+TArray<FGuid> UTemporalRewindSubsystem::GetOrphanedTimelineGuids() const
+{
+	TArray<FGuid> Result;
+	OrphanedTimelines.GetKeys(Result);
+	return Result;
+}
+
+void UTemporalRewindSubsystem::PurgeAllOrphanedTimelines()
+{
+	const int32 Num = OrphanedTimelines.Num();
+	OrphanedTimelines.Empty();
+
+	if (Num > 0)
+	{
+		UE_LOG(LogTemporalRewind, Display,
+			TEXT("[TemporalRewindSubsystem] Purged %d orphaned timelines."), Num);
+	}
+}
 
 void UTemporalRewindSubsystem::PurgeOrphanedTimeline(FGuid ActorGuid)
 {
@@ -435,117 +425,41 @@ void UTemporalRewindSubsystem::PurgeOrphanedTimeline(FGuid ActorGuid)
 	}
 }
 
-void UTemporalRewindSubsystem::PurgeAllOrphanedTimelines()
-{
-	const int32 Count = OrphanedTimelines.Num();
-	OrphanedTimelines.Empty();
-
-	if (Count > 0)
-	{
-		UE_LOG(LogTemporalRewind, Display,
-			TEXT("[TemporalRewindSubsystem] Purged %d orphaned timelines."), Count);
-	}
-}
-
-TArray<FGuid> UTemporalRewindSubsystem::GetOrphanedTimelineGuids() const
-{
-	TArray<FGuid> Result;
-	OrphanedTimelines.GetKeys(Result);
-	return Result;
-}
-
-// --- Capacity ---------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Capacity
+// ---------------------------------------------------------------------------
 
 int32 UTemporalRewindSubsystem::ComputeTimelineCapacity() const
 {
-	// Capacity = BufferDuration / RecordingInterval, with a +1 margin so that
-	// a snapshot pushed at exactly the boundary can never cause a one-frame
-	// overflow before the ring wraps.
-	const float Interval = (ActiveRecordingStrategy)
+	const float Interval = ActiveRecordingStrategy
 		? ActiveRecordingStrategy->GetRecordingInterval()
 		: 0.1f;
 
-	const int32 RawCapacity = FMath::CeilToInt(BufferDuration / FMath::Max(Interval, KINDA_SMALL_NUMBER));
-	return FMath::Max(RawCapacity + 1, 2);
+	return FMath::Max(FMath::CeilToInt(BufferDuration / FMath::Max(Interval, KINDA_SMALL_NUMBER)) + 1, 2);
 }
 
-// --- Rewind stubs (8c) ------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Rewind
+// ---------------------------------------------------------------------------
 
-void UTemporalRewindSubsystem::StartRewind()
-{
-	// Doc Q3(a): reject if there is nothing to rewind to.
-	bool bAnyBufferHasData = false;
-	for (const TPair<FGuid, TObjectPtr<UActorSnapshotTimeline>>& Pair : ActorTimelines)
-	{
-		if (Pair.Value && !Pair.Value->IsEmpty())
-		{
-			bAnyBufferHasData = true;
-			break;
-		}
-	}
-
-	if (!bAnyBufferHasData)
-	{
-		UE_LOG(LogTemporalRewind, Warning,
-			TEXT("[TemporalRewindSubsystem] StartRewind rejected: no recorded snapshots in any timeline."));
-		return;
-	}
-
-	if (!TryTransitionTo(ETemporalSystemState::Rewinding))
-	{
-		return;
-	}
-
-	const UWorld* World = GetWorld();
-	const float NowTimestamp = World ? World->GetTimeSeconds() : 0.0f;
-
-	ActiveSessionContext = NewObject<URewindSessionContext>(this);
-	// Doc Q4(a): capture RewindSpeed at session start; ignore later property changes.
-	ActiveSessionContext->Initialize(NowTimestamp, MaxScrubRange, RewindSpeed);
-
-	UE_LOG(LogTemporalRewind, Display,
-		TEXT("[TemporalRewindSubsystem] Rewind session started at T=%.3f"), NowTimestamp);
-
-	OnRewindStarted.Broadcast();
-}
-
-void UTemporalRewindSubsystem::PauseRewind()
-{
-	if (!TryTransitionTo(ETemporalSystemState::Paused))
-	{
-		return;
-	}
-	OnRewindPaused.Broadcast();
-}
-
-void UTemporalRewindSubsystem::ResumeRewind()
-{
-	if (!TryTransitionTo(ETemporalSystemState::Rewinding))
-	{
-		return;
-	}
-	OnRewindResumed.Broadcast();
-}
-
-void UTemporalRewindSubsystem::ScrubTo(float Timestamp)
+void UTemporalRewindSubsystem::Cancel()
 {
 	if (!IsRewindActive() || !ActiveSessionContext)
 	{
 		UE_LOG(LogTemporalRewind, Warning,
-			TEXT("[TemporalRewindSubsystem] ScrubTo called while no rewind session active. Rejected."));
+			TEXT("[TemporalRewindSubsystem] Cancel called while no rewind session active. Rejected."));
 		return;
 	}
 
-	// ScrubTo transitions Rewinding/Paused into Scrubbing. If already Scrubbing, stay.
-	if (CurrentState != ETemporalSystemState::Scrubbing)
-	{
-		TryTransitionTo(ETemporalSystemState::Scrubbing);
-	}
-
-	ActiveSessionContext->SetScrubTimestamp(Timestamp);
+	ActiveSessionContext->SetScrubTimestamp(ActiveSessionContext->GetOriginalPresentTimestamp());
 	ApplyStateAtScrubTimestamp();
 
-	OnScrubUpdated.Broadcast(ActiveSessionContext->GetCurrentScrubTimestamp());
+	UE_LOG(LogTemporalRewind, Display,
+		TEXT("[TemporalRewindSubsystem] Rewind cancelled; snapped back to present."));
+
+	OnRewindCancelled.Broadcast();
+	ActiveSessionContext = nullptr;
+	BeginCooldown();
 }
 
 void UTemporalRewindSubsystem::Commit()
@@ -559,7 +473,6 @@ void UTemporalRewindSubsystem::Commit()
 
 	const float CommitTimestamp = ActiveSessionContext->GetCurrentScrubTimestamp();
 
-	// Doc Q1(b): truncate both live AND orphaned timelines for consistency.
 	for (TPair<FGuid, TObjectPtr<UActorSnapshotTimeline>>& Pair : ActorTimelines)
 	{
 		if (Pair.Value)
@@ -567,6 +480,7 @@ void UTemporalRewindSubsystem::Commit()
 			Pair.Value->TruncateAfter(CommitTimestamp);
 		}
 	}
+
 	for (TPair<FGuid, TObjectPtr<UActorSnapshotTimeline>>& Pair : OrphanedTimelines)
 	{
 		if (Pair.Value)
@@ -579,30 +493,6 @@ void UTemporalRewindSubsystem::Commit()
 		TEXT("[TemporalRewindSubsystem] Rewind committed at T=%.3f"), CommitTimestamp);
 
 	OnRewindCommitted.Broadcast();
-
-	ActiveSessionContext = nullptr;
-	BeginCooldown();
-}
-
-void UTemporalRewindSubsystem::Cancel()
-{
-	if (!IsRewindActive() || !ActiveSessionContext)
-	{
-		UE_LOG(LogTemporalRewind, Warning,
-			TEXT("[TemporalRewindSubsystem] Cancel called while no rewind session active. Rejected."));
-		return;
-	}
-
-	// Snap scrub back to the original present and apply one last time so actors
-	// land exactly where they were when rewind began.
-	ActiveSessionContext->SetScrubTimestamp(ActiveSessionContext->GetOriginalPresentTimestamp());
-	ApplyStateAtScrubTimestamp();
-
-	UE_LOG(LogTemporalRewind, Display,
-		TEXT("[TemporalRewindSubsystem] Rewind cancelled; snapped back to present."));
-
-	OnRewindCancelled.Broadcast();
-
 	ActiveSessionContext = nullptr;
 	BeginCooldown();
 }
@@ -612,7 +502,79 @@ float UTemporalRewindSubsystem::GetScrubTimestamp() const
 	return ActiveSessionContext ? ActiveSessionContext->GetCurrentScrubTimestamp() : 0.0f;
 }
 
-// --- Config -----------------------------------------------------------------
+void UTemporalRewindSubsystem::PauseRewind()
+{
+	if (TryTransitionTo(ETemporalSystemState::Paused))
+	{
+		OnRewindPaused.Broadcast();
+	}
+}
+
+void UTemporalRewindSubsystem::ResumeRewind()
+{
+	if (TryTransitionTo(ETemporalSystemState::Rewinding))
+	{
+		OnRewindResumed.Broadcast();
+	}
+}
+
+void UTemporalRewindSubsystem::ScrubTo(float Timestamp)
+{
+	if (!IsRewindActive() || !ActiveSessionContext)
+	{
+		UE_LOG(LogTemporalRewind, Warning,
+			TEXT("[TemporalRewindSubsystem] ScrubTo called while no rewind session active. Rejected."));
+		return;
+	}
+
+	if (CurrentState != ETemporalSystemState::Scrubbing)
+	{
+		TryTransitionTo(ETemporalSystemState::Scrubbing);
+	}
+
+	ActiveSessionContext->SetScrubTimestamp(Timestamp);
+	ApplyStateAtScrubTimestamp();
+	OnScrubUpdated.Broadcast(ActiveSessionContext->GetCurrentScrubTimestamp());
+}
+
+void UTemporalRewindSubsystem::StartRewind()
+{
+	bool bAnyData = false;
+	for (const TPair<FGuid, TObjectPtr<UActorSnapshotTimeline>>& Pair : ActorTimelines)
+	{
+		if (Pair.Value && !Pair.Value->IsEmpty())
+		{
+			bAnyData = true;
+			break;
+		}
+	}
+
+	if (!bAnyData)
+	{
+		UE_LOG(LogTemporalRewind, Warning,
+			TEXT("[TemporalRewindSubsystem] StartRewind rejected: no recorded snapshots."));
+		return;
+	}
+
+	if (!TryTransitionTo(ETemporalSystemState::Rewinding))
+	{
+		return;
+	}
+
+	const float NowTimestamp = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+
+	ActiveSessionContext = NewObject<URewindSessionContext>(this);
+	ActiveSessionContext->Initialize(NowTimestamp, MaxScrubRange, RewindSpeed);
+
+	UE_LOG(LogTemporalRewind, Display,
+		TEXT("[TemporalRewindSubsystem] Rewind session started at T=%.3f"), NowTimestamp);
+
+	OnRewindStarted.Broadcast();
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
 
 void UTemporalRewindSubsystem::SetMaxScrubRange(float NewRange)
 {
@@ -621,14 +583,19 @@ void UTemporalRewindSubsystem::SetMaxScrubRange(float NewRange)
 
 void UTemporalRewindSubsystem::SetRecordingStrategy(URecordingStrategy* NewStrategy)
 {
-	if (NewStrategy == nullptr)
+	if (!NewStrategy)
 	{
 		UE_LOG(LogTemporalRewind, Warning,
 			TEXT("[TemporalRewindSubsystem] SetRecordingStrategy(nullptr) rejected."));
 		return;
 	}
+
 	ActiveRecordingStrategy = NewStrategy;
 }
+
+// ---------------------------------------------------------------------------
+// Apply state
+// ---------------------------------------------------------------------------
 
 void UTemporalRewindSubsystem::ApplyStateAtScrubTimestamp()
 {
@@ -639,7 +606,6 @@ void UTemporalRewindSubsystem::ApplyStateAtScrubTimestamp()
 
 	const float ScrubTime = ActiveSessionContext->GetCurrentScrubTimestamp();
 
-	// Live actors: fetch floor snapshot, dispatch ApplyState via reflection.
 	for (const TPair<FGuid, FRewindableActorEntry>& Pair : RegisteredActors)
 	{
 		const FRewindableActorEntry& Entry = Pair.Value;
@@ -655,22 +621,18 @@ void UTemporalRewindSubsystem::ApplyStateAtScrubTimestamp()
 			continue;
 		}
 
-		FTemporalSnapshot Snapshot;
-		if (Timeline->GetSnapshotAtTime(ScrubTime, Snapshot))
+		FTemporalSnapshot Before, After;
+		float Alpha = 0.0f;
+
+		if (Timeline->GetSnapshotPair(ScrubTime, Before, After, Alpha))
 		{
-			IRewindable::Execute_ApplyState(Obj, Snapshot);
+			if (IRewindable* Rewindable = Cast<IRewindable>(Obj))
+			{
+				Rewindable->ApplyStateInterpolated(Before, After, Alpha);
+			}
 		}
 	}
 
-	// Orphan actors: doc Q2(b), edge-triggered � only fire when scrub ENTERS a
-	// timestamp range where this orphan has data. We approximate "enter" by
-	// comparing against the previous scrub position tracked on the session.
-	// For v1, we fire on every tick the scrub position lies over the orphan's
-	// valid range; a proper edge-trigger requires a per-orphan "last fired at"
-	// set which is deferred to Phase 3 stress testing (doc line 1173).
-	//
-	// NOTE: This is a knowing compromise. A consumer binding OnOrphanedSnapshotReached
-	// should debounce on their side until Phase 3 lands the proper edge-trigger.
 	for (const TPair<FGuid, TObjectPtr<UActorSnapshotTimeline>>& Pair : OrphanedTimelines)
 	{
 		const UActorSnapshotTimeline* Timeline = Pair.Value;
@@ -710,16 +672,16 @@ void UTemporalRewindSubsystem::BeginCooldown()
 		TEXT("[TemporalRewindSubsystem] Cooldown started for %.2fs."), CooldownDuration);
 }
 
+// ---------------------------------------------------------------------------
+// Editor
+// ---------------------------------------------------------------------------
+
 #if WITH_EDITOR
 
 void UTemporalRewindSubsystem::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-
-	if (MaxScrubRange > BufferDuration)
-	{
-		MaxScrubRange = BufferDuration;
-	}
+	MaxScrubRange = FMath::Min(MaxScrubRange, BufferDuration);
 }
 
 #endif
