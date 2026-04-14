@@ -6,5 +6,5 @@ void IRewindable::ApplyStateInterpolated(
 	const FTemporalSnapshot& Before, const FTemporalSnapshot& After, float Alpha)
 {
 	// Default: snap to the floor snapshot. Existing actors require no changes.
-	Execute_ApplyState(Cast<UObject>(this), Before);
+	Execute_ApplyState(_getUObject(), Before);
 }

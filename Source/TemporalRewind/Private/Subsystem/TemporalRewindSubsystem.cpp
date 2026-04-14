@@ -628,7 +628,14 @@ void UTemporalRewindSubsystem::ApplyStateAtScrubTimestamp()
 		{
 			if (IRewindable* Rewindable = Cast<IRewindable>(Obj))
 			{
+				// C++ IRewindable (e.g. AutoSnapshotComponent) — supports interpolation.
 				Rewindable->ApplyStateInterpolated(Before, After, Alpha);
+			}
+			else
+			{
+				// Blueprint IRewindable — Cast fails for BP-only interface implementations.
+				// Fall back to the reflection path which works for both C++ and Blueprint.
+				IRewindable::Execute_ApplyState(Obj, Before);
 			}
 		}
 	}
