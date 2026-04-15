@@ -82,8 +82,7 @@ public:
 	// --- Recording -----------------------------------------------------------
 
 	UPROPERTY(Config, EditAnywhere, Category = "Recording",
-		meta = (EditCondition = "bUsePresetRecordingRate",
-			ToolTip = "Use a standard preset or enter a custom interval below."))
+		meta = (ToolTip = "Use a standard preset or enter a custom interval below."))
 	bool bUsePresetRecordingRate = true;
 
 	UPROPERTY(Config, EditAnywhere, Category = "Recording",
