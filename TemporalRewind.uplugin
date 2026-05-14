@@ -1,24 +1,26 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0.0",
+	"VersionName": "1.0",
 	"FriendlyName": "Temporal Rewind System",
-	"Description": "Production-ready temporal rewind for Unreal Engine 5.5+ Projects. World-level VCR controls, opaque snapshot storage, ring buffer history.",
+	"Description": "Production-ready temporal rewind for Unreal Engine 5.5+ projects. World-level VCR controls, opaque snapshot storage, ring buffer history, configurable cooldown.",
 	"Category": "Gameplay",
-	"CreatedBy": "",
-	"CreatedByURL": "",
+	"CreatedBy": "Prasanna Keerthivasan",
+	"CreatedByURL": "https://github.com/PrasannaK19999",
 	"DocsURL": "",
 	"MarketplaceURL": "",
-	"SupportURL": "",
-	"EnabledByDefault": true,
+	"SupportURL": "prasannak1999@gmail.com",
+	"EngineVersion": "5.5.0",
 	"CanContainContent": false,
 	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
 	"Installed": false,
 	"Modules": [
 		{
 			"Name": "TemporalRewind",
 			"Type": "Runtime",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "Default",
+			"PlatformAllowList": ["Win64", "Mac", "Linux"]
 		}
 	]
 }

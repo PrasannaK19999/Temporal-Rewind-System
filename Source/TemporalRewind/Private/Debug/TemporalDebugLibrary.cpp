@@ -3,6 +3,7 @@
 #include "Debug/TemporalDebugLibrary.h"
 
 #include "Data/TemporalSnapshot.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "Subsystem/TemporalRewindSubsystem.h"
