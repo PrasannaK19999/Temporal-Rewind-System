@@ -1,4 +1,4 @@
-// Copyright (c) Temporal Rewind System. All rights reserved.
+// Copyright (c) 2026 Prasanna Keerthivasan. All rights reserved.
 
 #include "UI/TemporalScrubWidget.h"
 
