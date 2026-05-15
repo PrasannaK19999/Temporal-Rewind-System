@@ -1,3 +1,5 @@
+// Copyright (c) Temporal Rewind System. All rights reserved.
+
 #pragma once
 
 #include "CoreMinimal.h"
