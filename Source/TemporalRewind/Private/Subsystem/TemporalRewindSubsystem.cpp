@@ -502,6 +502,26 @@ float UTemporalRewindSubsystem::GetScrubTimestamp() const
 	return ActiveSessionContext ? ActiveSessionContext->GetCurrentScrubTimestamp() : 0.0f;
 }
 
+float UTemporalRewindSubsystem::GetOldestAllowedTimestamp() const
+{
+	return ActiveSessionContext ? ActiveSessionContext->GetOldestAllowedTimestamp() : 0.f;
+}
+
+float UTemporalRewindSubsystem::GetOriginalPresentTimestamp() const
+{
+	return ActiveSessionContext ? ActiveSessionContext->GetOriginalPresentTimestamp() : 0.f;
+}
+
+void UTemporalRewindSubsystem::SetRewindSpeed(float NewSpeed)
+{
+	RewindSpeed = FMath::Max(NewSpeed, 0.01f);
+
+	if (ActiveSessionContext)
+	{
+		ActiveSessionContext->SetRewindSpeed(RewindSpeed);
+	}
+}
+
 void UTemporalRewindSubsystem::PauseRewind()
 {
 	if (TryTransitionTo(ETemporalSystemState::Paused))

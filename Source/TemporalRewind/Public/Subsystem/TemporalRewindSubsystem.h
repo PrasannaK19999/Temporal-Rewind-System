@@ -102,6 +102,31 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Temporal Rewind|Rewind")
 	void StartRewind();
 
+	/** Returns the oldest timestamp the active session can scrub to. 0 if no session. */
+	UFUNCTION(BlueprintPure, Category = "Temporal Rewind|Rewind")
+	float GetOldestAllowedTimestamp() const;
+
+	/** Returns the present-moment timestamp the session started from. 0 if no session. */
+	UFUNCTION(BlueprintPure, Category = "Temporal Rewind|Rewind")
+	float GetOriginalPresentTimestamp() const;
+
+	/** Returns seconds remaining in the active cooldown. 0 if not in cooldown. */
+	UFUNCTION(BlueprintPure, Category = "Temporal Rewind|State")
+	float GetCooldownTimeRemaining() const { return CooldownTimeRemaining; }
+
+	/** Returns the configured cooldown duration in seconds. */
+	UFUNCTION(BlueprintPure, Category = "Temporal Rewind|Config")
+	float GetCooldownDuration() const { return CooldownDuration; }
+
+	/** Returns the current rewind playback speed multiplier. */
+	UFUNCTION(BlueprintPure, Category = "Temporal Rewind|Config")
+	float GetRewindSpeed() const { return RewindSpeed; }
+
+	/** Sets the rewind playback speed. Also updates the active session if one is running. */
+	UFUNCTION(BlueprintCallable, Category = "Temporal Rewind|Config",
+		meta = (ClampMin = "0.01"))
+	void SetRewindSpeed(float NewSpeed);
+
 	// --- State -----------------------------------------------------------
 
 	UFUNCTION(BlueprintPure, Category = "Temporal Rewind|State")
