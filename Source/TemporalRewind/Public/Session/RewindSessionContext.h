@@ -28,6 +28,8 @@ public:
 
 	void SetDirection(ERewindDirection NewDirection) { Direction = NewDirection; }
 
+	void SetRewindSpeed(float NewSpeed) { RewindSpeed = FMath::Max(NewSpeed, 0.01f); }
+
 	ERewindDirection GetDirection() const { return Direction; }
 
 	float GetCurrentScrubTimestamp() const { return CurrentScrubTimestamp; }
